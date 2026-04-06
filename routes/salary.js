@@ -34,7 +34,7 @@ router.post(
       employeeId, employeeName, designation, department,
       dateOfJoining, payMonth, bankName, bankAcNo, email,
       payDays, lopDays, basicSalary, incentivePay,
-      travelAllowance, lossOfPay, isNewJoinee, slipImageData,
+      travelAllowance, lossOfPay, isNewJoinee, slipImageData, transactionId,
     } = req.body;
 
     const id = employeeId.trim().toUpperCase();
@@ -67,6 +67,11 @@ router.post(
         {
           $set: {
             employeeId: id, employeeName, email, payMonth,
+            designation:     designation     || "",
+            department:      department      || "",
+            dateOfJoining:   dateOfJoining   || "",
+            bankName:        bankName        || "",
+            bankAcNo:        bankAcNo        || "",
             basicSalary:     Number(basicSalary) || 0,
             incentivePay:    Number(incentivePay) || 0,
             travelAllowance: Number(travelAllowance) || 0,
@@ -74,6 +79,7 @@ router.post(
             totalEarnings, totalDeductions, netSalary,
             payDays:  Number(payDays) || 0,
             lopDays:  Number(lopDays) || 0,
+            transactionId: transactionId || "",
             isNewJoinee: Boolean(isNewJoinee),
           },
         },
@@ -180,6 +186,59 @@ router.post("/resend-email", async (req, res) => {
   } catch (err) {
     console.error("[POST salary/resend-email]", err);
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/salary/receipts
+// Get all salary receipts, optionally filtered by ?month=MM&year=YYYY
+// Uses aggregation to join Employee data so the full slip can be reconstructed
+// ─────────────────────────────────────────────────────────────────────────────
+router.get("/receipts", async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    const matchStage = {};
+
+    if (year && month) {
+      matchStage.payMonth = `${year}-${String(month).padStart(2, "0")}`;
+    } else if (year) {
+      matchStage.payMonth = { $regex: `^${year}-` };
+    }
+
+    const records = await SalaryRecord.aggregate([
+      { $match: matchStage },
+      { $sort: { createdAt: -1 } },
+      {
+        $lookup: {
+          from: "employees",
+          localField: "employeeId",
+          foreignField: "employeeId",
+          as: "empData",
+        },
+      },
+      {
+        $addFields: {
+          empDoc: { $arrayElemAt: ["$empData", 0] },
+        },
+      },
+      {
+        $addFields: {
+          designation:   { $ifNull: ["$empDoc.designation",   ""] },
+          department:    { $ifNull: ["$empDoc.department",    ""] },
+          dateOfJoining: { $ifNull: ["$empDoc.dateOfJoining", ""] },
+          bankName:      { $ifNull: ["$empDoc.bankName",      ""] },
+          bankAcNo:      { $ifNull: ["$empDoc.bankAcNo",      ""] },
+        },
+      },
+      {
+        $project: { empData: 0, empDoc: 0 },
+      },
+    ]);
+
+    return res.json({ success: true, count: records.length, data: records });
+  } catch (err) {
+    console.error("[GET salary/receipts]", err);
+    return res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
