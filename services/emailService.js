@@ -1,6 +1,4 @@
 import { BrevoClient } from "@getbrevo/brevo";
-import puppeteer from "puppeteer-core";
-import chromium from "@sparticuz/chromium";
 
 // ── Initialize Brevo client ──────────────────────────────────────────────────
 const client = new BrevoClient({ apiKey: process.env.BREVO_API_KEY });
@@ -29,59 +27,84 @@ function numberToWords(num) {
 // Plain integer formatting — matches frontend (no .00 decimals)
 const fmt = (n) => Number(n || 0).toLocaleString("en-IN");
 
-// ── Generate PDF buffer from image ──────────────────────────────────────────
-async function generatePDFBuffer(slipImageData) {
-  const fullHtml = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8"/>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body {
-      width: 210mm;
-      height: 297mm;
-      margin: 0 !important;
-      padding: 0 !important;
-      background: #ffffff;
-      overflow: hidden;
+// ── Build a minimal valid PDF from a JPEG base64 string ─────────────────────
+// No puppeteer, no external packages — pure PDF spec (works on any machine)
+// ── Read actual pixel dimensions from a JPEG buffer ─────────────────────────
+function readJpegDimensions(buf) {
+  let i = 2; // skip initial FFD8
+  while (i < buf.length - 4) {
+    if (buf[i] !== 0xFF) break;
+    const marker = buf[i + 1];
+    const segLen = buf.readUInt16BE(i + 2);
+    if (marker === 0xC0 || marker === 0xC1 || marker === 0xC2) {
+      const h = buf.readUInt16BE(i + 5);
+      const w = buf.readUInt16BE(i + 7);
+      return { w, h };
     }
-    img {
-      display: block;
-      width: 210mm;
-      height: 297mm;
-      margin: 0;
-      padding: 0;
-    }
-  </style>
-</head>
-<body><img src="${slipImageData}" /></body>
-</html>`;
-
-  // ── Use sparticuz/chromium on Render (cloud), fallback to local Chrome for dev
-  const isLocal = process.env.NODE_ENV !== "production";
-
-  const browser = await puppeteer.launch({
-    args: chromium.args,
-    executablePath: isLocal
-      ? undefined  // uses system Chrome locally if available
-      : await chromium.executablePath(),
-    headless: chromium.headless,
-    defaultViewport: chromium.defaultViewport,
-  });
-
-  try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 1 });
-    await page.setContent(fullHtml, { waitUntil: "networkidle0" });
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: { top: "0mm", bottom: "0mm", left: "0mm", right: "0mm" },
-    });
-    return pdfBuffer;
-  } finally {
-    await browser.close();
+    i += 2 + segLen;
   }
+  return { w: 3176, h: 4492 }; // fallback: scale:4 canvas
+}
+
+function buildPDFFromJpeg(base64Jpeg) {
+  const raw = base64Jpeg.replace(/^data:image\/\w+;base64,/, "");
+  const imgBuffer = Buffer.from(raw, "base64");
+
+  // Read REAL pixel dimensions from the JPEG header
+  const { w: imgW, h: imgH } = readJpegDimensions(imgBuffer);
+
+  // A4 page in PDF points (72dpi): 595 x 842
+  const W = 595, H = 842;
+
+  const lines = [];
+  const offsets = [];
+
+  const push = (s) => lines.push(s);
+
+  push("%PDF-1.4");
+  push("%\xFF\xFF\xFF\xFF");
+
+  offsets[1] = lines.join("\n").length + 1;
+  push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj");
+
+  offsets[2] = lines.join("\n").length + 1;
+  push("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj");
+
+  offsets[3] = lines.join("\n").length + 1;
+  push(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>\nendobj`);
+
+  // Draw image scaled to fill the full A4 page
+  const contentStr = `q ${W} 0 0 ${H} 0 0 cm /Im1 Do Q`;
+  const contentBytes = Buffer.from(contentStr, "latin1");
+  offsets[4] = lines.join("\n").length + 1;
+  push(`4 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n${contentStr}\nendstream\nendobj`);
+
+  // Use REAL imgW/imgH here — this was the bug causing the tiny "S" corner
+  offsets[5] = lines.join("\n").length + 1;
+  push(`5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${imgW} /Height ${imgH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${imgBuffer.length} >>\nstream`);
+
+  // Build the PDF buffer in parts (image is binary, rest is text)
+  const textBefore = Buffer.from(lines.join("\n") + "\n", "latin1");
+  const afterImage = `\nendstream\nendobj\n`;
+
+  // Cross-reference table
+  const xrefOffset = textBefore.length + imgBuffer.length + afterImage.length;
+  const xrefLines = [
+    "xref",
+    `0 6`,
+    "0000000000 65535 f \n",
+  ];
+  for (let i = 1; i <= 5; i++) {
+    xrefLines.push(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
+  }
+  xrefLines.push(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
+
+  return Buffer.concat([
+    textBefore,
+    imgBuffer,
+    Buffer.from(afterImage, "latin1"),
+    Buffer.from(xrefLines.join(""), "latin1"),
+  ]);
 }
 
 // ── Email body ───────────────────────────────────────────────────────────────
@@ -136,18 +159,112 @@ function buildEmailBody(data) {
 </html>`;
 }
 
+// ── Build a plain-text fallback PDF when no image is available (resend case) ─
+function buildFallbackPDF(data) {
+  const fmt = (n) => Number(n || 0).toLocaleString("en-IN");
+  const totalEarnings  = (Number(data.basicSalary) || 0) + (Number(data.incentivePay) || 0) + (Number(data.travelAllowance) || 0);
+  const totalDeduction = Number(data.lossOfPay) || 0;
+  const netSalary      = totalEarnings - totalDeduction;
+  const payMonthLabel  = data.payMonth
+    ? new Date(data.payMonth + "-01").toLocaleDateString("en-IN", { month: "long", year: "numeric" })
+    : "—";
+
+  // Build a minimal PDF with embedded text (no image dependency)
+  const lines = [];
+  const offsets = [];
+  const push = (s) => lines.push(s);
+
+  const text = [
+    `BT`,
+    `/F1 18 Tf`,
+    `50 800 Td`,
+    `(Skyup Digital Solutions — Salary Slip) Tj`,
+    `/F1 12 Tf`,
+    `0 -30 Td`,
+    `(Employee: ${data.employeeName || ""}) Tj`,
+    `0 -18 Td`,
+    `(Employee ID: ${data.employeeId || ""}) Tj`,
+    `0 -18 Td`,
+    `(Pay Month: ${payMonthLabel}) Tj`,
+    `0 -18 Td`,
+    `(Designation: ${data.designation || ""}) Tj`,
+    `0 -18 Td`,
+    `(Department: ${data.department || ""}) Tj`,
+    `0 -30 Td`,
+    `/F1 13 Tf`,
+    `(EARNINGS) Tj`,
+    `/F1 12 Tf`,
+    `0 -20 Td`,
+    `(Basic Salary: Rs. ${fmt(data.basicSalary)}) Tj`,
+    `0 -18 Td`,
+    `(Incentive Pay: Rs. ${fmt(data.incentivePay)}) Tj`,
+    `0 -18 Td`,
+    `(Travel Allowance: Rs. ${fmt(data.travelAllowance)}) Tj`,
+    `0 -18 Td`,
+    `(Total Earnings: Rs. ${fmt(totalEarnings)}) Tj`,
+    `0 -30 Td`,
+    `/F1 13 Tf`,
+    `(DEDUCTIONS) Tj`,
+    `/F1 12 Tf`,
+    `0 -20 Td`,
+    `(Loss of Pay: Rs. ${fmt(data.lossOfPay)}) Tj`,
+    `0 -30 Td`,
+    `/F1 14 Tf`,
+    `(NET SALARY: Rs. ${fmt(netSalary)}) Tj`,
+    `0 -30 Td`,
+    `/F1 11 Tf`,
+    `(Bank: ${data.bankName || ""}) Tj`,
+    `0 -18 Td`,
+    `(Account No: ${data.bankAcNo || ""}) Tj`,
+    `0 -18 Td`,
+    `(Transaction ID: ${data.transactionId || ""}) Tj`,
+    `ET`,
+  ].join("\n");
+
+  push("%PDF-1.4");
+  push("%\xFF\xFF\xFF\xFF");
+
+  offsets[1] = lines.join("\n").length + 1;
+  push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj");
+
+  offsets[2] = lines.join("\n").length + 1;
+  push("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj");
+
+  offsets[3] = lines.join("\n").length + 1;
+  push(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj`);
+
+  const contentBytes = Buffer.from(text, "latin1");
+  offsets[4] = lines.join("\n").length + 1;
+  push(`4 0 obj\n<< /Length ${contentBytes.length} >>\nstream\n${text}\nendstream\nendobj`);
+
+  offsets[5] = lines.join("\n").length + 1;
+  push(`5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj`);
+
+  const textBuf = Buffer.from(lines.join("\n") + "\n", "latin1");
+  const xrefOffset = textBuf.length;
+  const xrefLines = ["xref", `0 6`, "0000000000 65535 f \n"];
+  for (let i = 1; i <= 5; i++) {
+    xrefLines.push(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
+  }
+  xrefLines.push(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
+
+  return Buffer.concat([textBuf, Buffer.from(xrefLines.join(""), "latin1")]);
+}
+
 // ── Send salary slip email with PDF attachment ───────────────────────────────
 export async function sendSalarySlipEmail(data) {
   const { email, employeeName, payMonth, slipImageData } = data;
 
-  if (!slipImageData) {
-    throw new Error("slipImageData is required — must be sent from +Page.jsx handleGeneratePDF");
-  }
-
   console.log(`[Email] Generating PDF for ${employeeName} → ${email}`);
 
-  const pdfBuffer = await generatePDFBuffer(slipImageData);
-  const pdfBase64 = Buffer.from(pdfBuffer).toString("base64");
+  // Use image-based PDF if canvas image is available (initial send),
+  // otherwise fall back to text-based PDF (resend from history)
+  const pdfBuffer = slipImageData
+    ? buildPDFFromJpeg(slipImageData)
+    : buildFallbackPDF(data);
+
+  console.log(`[Email] Using ${slipImageData ? "image" : "fallback text"} PDF`);
+  const pdfBase64 = pdfBuffer.toString("base64");
 
   const payMonthLabel = payMonth
     ? new Date(payMonth + "-01").toLocaleDateString("en-IN", { month: "long", year: "numeric" })
