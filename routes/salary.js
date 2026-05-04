@@ -34,7 +34,7 @@ router.post(
       employeeId, employeeName, designation, department,
       dateOfJoining, payMonth, bankName, bankAcNo, email,
       payDays, lopDays, basicSalary, incentivePay,
-      travelAllowance, lossOfPay, isNewJoinee, slipImageData, transactionId,
+      travelAllowance, lossOfPay, professionalTax, isNewJoinee, slipImageData, transactionId,
     } = req.body;
 
     const id = employeeId.trim().toUpperCase();
@@ -58,7 +58,7 @@ router.post(
 
       // ── 2. Compute salary figures ──────────────────────────────────────────
       const totalEarnings   = (Number(basicSalary) || 0) + (Number(incentivePay) || 0) + (Number(travelAllowance) || 0);
-      const totalDeductions = Number(lossOfPay) || 0;
+      const totalDeductions = (Number(lossOfPay) || 0) + (Number(professionalTax) || 0);
       const netSalary       = totalEarnings - totalDeductions;
 
       // ── 3. Save / update salary record ────────────────────────────────────
@@ -76,6 +76,7 @@ router.post(
             incentivePay:    Number(incentivePay) || 0,
             travelAllowance: Number(travelAllowance) || 0,
             lossOfPay:       Number(lossOfPay) || 0,
+            professionalTax: Number(professionalTax) || 0,
             totalEarnings, totalDeductions, netSalary,
             payDays:  Number(payDays) || 0,
             lopDays:  Number(lopDays) || 0,
@@ -95,7 +96,7 @@ router.post(
           employeeId: id, employeeName, designation, department,
           dateOfJoining, payMonth, bankName, bankAcNo, email,
           payDays, lopDays, basicSalary, incentivePay,
-          travelAllowance, lossOfPay, isNewJoinee, slipImageData,
+          travelAllowance, lossOfPay, professionalTax, isNewJoinee, slipImageData,
         });
 
         // Mark email as sent in DB

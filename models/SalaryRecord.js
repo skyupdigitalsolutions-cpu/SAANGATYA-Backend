@@ -15,6 +15,7 @@ const salaryRecordSchema = new mongoose.Schema(
     incentivePay:   { type: Number, default: 0 },
     travelAllowance:{ type: Number, default: 0 },
     lossOfPay:      { type: Number, default: 0 },
+    professionalTax:{ type: Number, default: 0 },
     totalEarnings:  { type: Number, required: true },
     totalDeductions:{ type: Number, required: true },
     netSalary:      { type: Number, required: true },
