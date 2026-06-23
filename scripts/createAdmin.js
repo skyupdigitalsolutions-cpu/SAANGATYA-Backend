@@ -26,9 +26,9 @@ const createAdmin = async () => {
     console.log("6️⃣  No existing admin found, creating...");
 
     const admin = new Admin({
-      name: "SKYUP",
+      name: "SAANGATYA",
       email: "skyupdigitalsolutions@gmail.com",
-      password: "SKYUP@2026",
+      password: "Salary@2026",
       isActive: true,
     });
     console.log("7️⃣  Admin object created, saving...");
@@ -36,7 +36,7 @@ const createAdmin = async () => {
     await admin.save();
     console.log("✅ Admin created successfully!");
     console.log("📧 Login Email : skyupdigitalsolutions@gmail.com");
-    console.log("🔑 Password    : SKYUP@2026");
+    console.log("🔑 Password    : Salary@2026");
     console.log("🔐 Owner Email : " + (process.env.OWNER_EMAIL || "NOT SET in .env"));
 
   } catch (err) {

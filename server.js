@@ -1,70 +1,54 @@
 import "dotenv/config";
 import express from "express";
 import mongoose from "mongoose";
-import cors from "cors";
 import morgan from "morgan";
 import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 
 import employeeRoutes from "./routes/employees.js";
 import salaryRoutes   from "./routes/salary.js";
 import authRoutes     from "./routes/auth.js";
 import authMiddleware  from "./middleware/auth.js";
 
-const app  = express();app.set('trust proxy', 1);
+const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 5000;
 
-// ─── Security & Logging ──────────────────────────────────────────────────────
-app.use(helmet());
-app.use(morgan("dev"));
+// ─── CORS — manual middleware, runs before EVERYTHING ────────────────────────
+const ALLOWED_ORIGINS = [
+  process.env.FRONTEND_URL || "http://localhost:3000",
+  "http://localhost:5173",
+  "http://localhost:4173",
+];
 
-// ─── CORS ────────────────────────────────────────────────────────────────────
-app.use(
-  cors({
-    origin: [
-      process.env.FRONTEND_URL || "http://localhost:3000",
-      "http://localhost:5173",
-      "http://localhost:4173",
-    ],
-    methods: ["GET", "POST", "PUT", "DELETE"],
-    credentials: true,
-  })
-);
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// ─── Security & Logging ──────────────────────────────────────────────────────
+app.use(helmet({
+  crossOriginResourcePolicy: false,
+  contentSecurityPolicy: false,
+}));
+app.use(morgan("dev"));
 
 // ─── Body Parser ─────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// ─── Rate Limiting ───────────────────────────────────────────────────────────
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: "Too many requests. Please try again later." },
-});
-app.use("/api/", limiter);
-
-// Stricter limit for login attempts
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { success: false, message: "Too many login attempts. Try again in 15 minutes." },
-});
-app.use("/api/auth/login", loginLimiter);
-
-// Stricter limit for email sending
-const emailLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 50,
-  message: { success: false, message: "Email rate limit reached. Try again later." },
-});
-app.use("/api/salary/send", emailLimiter);
-
 // ─── Public Routes ───────────────────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
 
-// ─── Protected Routes (require valid JWT) ────────────────────────────────────
+// ─── Protected Routes ────────────────────────────────────────────────────────
 app.use("/api/employees", authMiddleware, employeeRoutes);
 app.use("/api/salary",    authMiddleware, salaryRoutes);
 
@@ -96,9 +80,9 @@ app.get("/", (req, res) => {
         "PUT  /api/employees/:id": "Update employee (🔒 auth required)",
       },
       salary: {
-        "POST /api/salary/send":          "Save salary + send email (🔒 auth required)",
-        "GET  /api/salary/history/:id":   "Salary history (🔒 auth required)",
-        "POST /api/salary/resend-email":  "Resend salary slip email (🔒 auth required)",
+        "POST /api/salary/send":         "Save salary + send email (🔒 auth required)",
+        "GET  /api/salary/receipts":     "Get all receipts (🔒 auth required)",
+        "POST /api/salary/resend-email": "Resend salary slip email (🔒 auth required)",
       },
       health: "GET /health",
     },
